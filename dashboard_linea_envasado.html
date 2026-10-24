@@ -184,7 +184,8 @@
       font-weight: 700;
       letter-spacing: -0.03em;
       font-variant-numeric: tabular-nums;
-      overflow-wrap: anywhere;
+      overflow-wrap: normal;
+      white-space: nowrap;
     }
     .kpi-ayuda { margin: 0; color: var(--muted); font-size: 12px; }
     /* Semáforo solo en el borde de SPI y CPI. */
@@ -1385,7 +1386,20 @@
               suggestedMax: 100,
               ticks: { callback: function (v) { return formatoNumero(v, 0) + "%"; } }
             },
-            y: { ticks: { autoSkip: false, font: { size: 11 } } }
+            y: {
+              ticks: { autoSkip: false, font: { size: 11 }, padding: 8 },
+              afterFit: function (escala) {
+                const ctx = escala.ctx;
+                ctx.save();
+                ctx.font = "600 11px Inter, system-ui, sans-serif";
+                let ancho = 0;
+                (escala.chart.data.labels || []).forEach(function (et) {
+                  ancho = Math.max(ancho, ctx.measureText(String(et)).width);
+                });
+                ctx.restore();
+                escala.width = Math.max(escala.width, Math.ceil(ancho) + 36);
+              }
+            }
           }
         }
       });
@@ -1541,52 +1555,178 @@
       renderizarAlertas(evm);
     }
 
-    /* Captura #reporte. Los botones .no-print no entran al PDF. */
+    /* Cada hoja se dibuja entera y se escala para caber. No se parte una tarjeta por la mitad. */
+    function clonarParaPdf(nodo) {
+      const copia = nodo.cloneNode(true);
+      copia.querySelectorAll(".no-print").forEach(function (n) { n.remove(); });
+      const origen = nodo.querySelectorAll("canvas");
+      const destino = copia.querySelectorAll("canvas");
+      origen.forEach(function (canvas, i) {
+        const img = document.createElement("img");
+        img.alt = canvas.getAttribute("aria-label") || "Gráfico";
+        img.src = canvas.toDataURL("image/png");
+        img.style.display = "block";
+        img.style.width = "100%";
+        img.style.height = Math.max(220, canvas.parentElement.getBoundingClientRect().height) + "px";
+        img.style.objectFit = "contain";
+        if (destino[i]) destino[i].replaceWith(img);
+      });
+      return copia;
+    }
+
+    function armarHojasPdf() {
+      const host = document.createElement("div");
+      host.setAttribute("data-pdf-host", "1");
+      host.style.cssText = "position:fixed;left:-12000px;top:0;width:1100px;background:#f5f7fa;";
+      document.body.appendChild(host);
+      const hojas = [];
+      function hojaNueva() {
+        const hoja = document.createElement("div");
+        hoja.style.cssText = "width:1100px;background:#f5f7fa;padding:8px;box-sizing:border-box;";
+        host.appendChild(hoja);
+        hojas.push(hoja);
+        return hoja;
+      }
+      const portada = hojaNueva();
+      [".encabezado", "#resumen", ".kpis", ".kpis-sec"].forEach(function (sel) {
+        const nodo = document.querySelector("#reporte " + sel);
+        if (nodo) portada.appendChild(clonarParaPdf(nodo));
+      });
+      document.querySelectorAll("#reporte .bloque").forEach(function (bloque) {
+        const hoja = hojaNueva();
+        hoja.appendChild(clonarParaPdf(bloque));
+      });
+      const tabla = document.getElementById("tabla-critica");
+      const filas = Array.from(tabla.querySelectorAll("tbody tr"));
+      const seccionTabla = tabla.closest("section");
+      let hojaTabla = null;
+      let cuerpo = null;
+      function abrirTabla() {
+        hojaTabla = hojaNueva();
+        const sec = document.createElement("section");
+        sec.className = "tarjeta";
+        const h2 = document.createElement("h2");
+        h2.textContent = seccionTabla.querySelector("h2").textContent;
+        sec.appendChild(h2);
+        const nota = seccionTabla.querySelector(".nota");
+        if (nota) sec.appendChild(clonarParaPdf(nota));
+        const wrap = document.createElement("div");
+        wrap.className = "tabla-wrap";
+        const t = document.createElement("table");
+        t.innerHTML = "<thead>" + tabla.querySelector("thead").innerHTML + "</thead><tbody></tbody>";
+        wrap.appendChild(t);
+        sec.appendChild(wrap);
+        hojaTabla.appendChild(sec);
+        cuerpo = t.querySelector("tbody");
+      }
+      filas.forEach(function (tr) {
+        if (!hojaTabla) abrirTabla();
+        cuerpo.appendChild(tr.cloneNode(true));
+        if (hojaTabla.scrollHeight > 640 && cuerpo.rows.length > 1) {
+          cuerpo.removeChild(cuerpo.lastChild);
+          abrirTabla();
+          cuerpo.appendChild(tr.cloneNode(true));
+        }
+      });
+      const panel = document.getElementById("panel-alertas");
+      const avisos = Array.from(panel.querySelectorAll(".alerta"));
+      let hojaAvisos = null;
+      let lista = null;
+      function abrirAvisos() {
+        hojaAvisos = hojaNueva();
+        const sec = document.createElement("section");
+        sec.className = "tarjeta alertas";
+        const h2 = document.createElement("h2");
+        h2.textContent = panel.querySelector("h2").textContent;
+        sec.appendChild(h2);
+        lista = document.createElement("div");
+        sec.appendChild(lista);
+        hojaAvisos.appendChild(sec);
+      }
+      avisos.forEach(function (aviso) {
+        if (!hojaAvisos) abrirAvisos();
+        lista.appendChild(clonarParaPdf(aviso));
+        if (hojaAvisos.scrollHeight > 640 && lista.childElementCount > 1) {
+          lista.removeChild(lista.lastChild);
+          abrirAvisos();
+          lista.appendChild(clonarParaPdf(aviso));
+        }
+      });
+      const pie = document.querySelector("#reporte .pie");
+      if (pie) {
+        const ultima = hojas[hojas.length - 1];
+        if (ultima && ultima.scrollHeight < 620) ultima.appendChild(clonarParaPdf(pie));
+        else hojaNueva().appendChild(clonarParaPdf(pie));
+      }
+      return { host: host, hojas: hojas };
+    }
+
+    function pegarHoja(pdf, canvas) {
+      const pageW = pdf.internal.pageSize.getWidth();
+      const pageH = pdf.internal.pageSize.getHeight();
+      pdf.setFillColor(255, 255, 255);
+      pdf.rect(0, 0, pageW, pageH, "F");
+      const maxW = pageW - 12;
+      const maxH = pageH - 16;
+      const ratio = Math.min(maxW / canvas.width, maxH / canvas.height);
+      const w = canvas.width * ratio;
+      const h = canvas.height * ratio;
+      pdf.addImage(canvas.toDataURL("image/jpeg", 0.92), "JPEG", 6 + (maxW - w) / 2, 6, w, h);
+    }
+
+    function ponerEnlace(pdf, url) {
+      if (!url || url.indexOf("http") !== 0) return;
+      pdf.setFont("helvetica", "normal");
+      pdf.setFontSize(9);
+      pdf.setTextColor(44, 111, 187);
+      pdf.textWithLink("Acceso directo a la web: " + url, 8, pdf.internal.pageSize.getHeight() - 5, { url: url });
+    }
+
     function generarPDF() {
       if (typeof html2pdf === "undefined") {
         mostrarAviso("No se pudo generar el PDF: html2pdf.js no está disponible. Hace falta internet para cargarlo desde el CDN.", true);
         return;
       }
-      const elemento = document.getElementById("reporte");
       const enlace = document.getElementById("enlace-web");
       const urlWeb = enlace ? (enlace.getAttribute("href") || "") : "";
       document.body.classList.add("exportando-pdf");
-      void elemento.offsetWidth;
+      const reporte = document.getElementById("reporte");
+      const anchoPrevio = reporte.style.width;
+      const maxPrevio = reporte.style.maxWidth;
+      reporte.style.width = "1100px";
+      reporte.style.maxWidth = "1100px";
+      void reporte.offsetWidth;
       if (graficoCurva) graficoCurva.resize();
       if (graficoFases) graficoFases.resize();
-      const opciones = {
-        margin: [6, 6, 14, 6],
-        filename: "Entrega_PMO_Allan_Vejar_Pedro_Saenz_Tatiana_Hernandez.pdf",
-        image: { type: "jpeg", quality: 0.95 },
+      const armado = armarHojasPdf();
+      const opcionesCanvas = {
+        margin: 0,
         html2canvas: { scale: 2, backgroundColor: "#f5f7fa", useCORS: true, logging: false },
-        jsPDF: { unit: "mm", format: "a4", orientation: "landscape" },
-        pagebreak: {
-          mode: ["css", "legacy"],
-          avoid: [".bloque", ".kpis", ".kpis-sec", ".resumen", ".encabezado", ".alerta", "tr"]
-        }
+        jsPDF: { unit: "mm", format: "a4", orientation: "landscape" }
       };
-      html2pdf().set(opciones).from(elemento).toPdf().get("pdf").then(function (pdf) {
-        if (urlWeb && urlWeb.indexOf("http") === 0) {
-          const linea = "Acceso directo a la web: " + urlWeb;
-          const total = pdf.internal.getNumberOfPages();
-          for (let i = 1; i <= total; i++) {
-            pdf.setPage(i);
-            pdf.setFont("helvetica", "normal");
-            pdf.setFontSize(9);
-            pdf.setTextColor(44, 111, 187);
-            pdf.textWithLink(linea, 8, pdf.internal.pageSize.getHeight() - 5, { url: urlWeb });
-          }
-        }
-        pdf.save(opciones.filename);
-      }).then(function () {
-        document.body.classList.remove("exportando-pdf");
-        if (graficoCurva) graficoCurva.resize();
-        if (graficoFases) graficoFases.resize();
+      const sonda = document.createElement("div");
+      let cadena = html2pdf().set(opcionesCanvas).from(sonda).toPdf().get("pdf");
+      armado.hojas.forEach(function (hoja, i) {
+        cadena = cadena.then(function (pdf) {
+          return html2pdf().set(opcionesCanvas).from(hoja).toCanvas().get("canvas").then(function (canvas) {
+            if (i) pdf.addPage();
+            pegarHoja(pdf, canvas);
+            ponerEnlace(pdf, urlWeb);
+            return pdf;
+          });
+        });
+      });
+      cadena.then(function (pdf) {
+        pdf.save("Entrega_PMO_Allan_Vejar_Pedro_Saenz_Tatiana_Hernandez.pdf");
       }).catch(function (err) {
+        mostrarAviso("No se pudo generar el PDF. " + (err && err.message ? err.message : "Revisa la conexión."), true);
+      }).then(function () {
+        armado.host.remove();
+        reporte.style.width = anchoPrevio;
+        reporte.style.maxWidth = maxPrevio;
         document.body.classList.remove("exportando-pdf");
         if (graficoCurva) graficoCurva.resize();
         if (graficoFases) graficoFases.resize();
-        mostrarAviso("No se pudo generar el PDF. " + (err && err.message ? err.message : "Revisa la conexión."), true);
       });
     }
 
