@@ -50,6 +50,9 @@
       border-radius: 12px;
       box-shadow: var(--sombra);
       padding: 16px 18px;
+    }
+    /* Solo bloques bajos. Una tarjeta más alta que la hoja, si no se puede partir, deja la página siguiente vacía. */
+    .kpis, .kpis-sec, .bloque, .encabezado, .resumen, tr {
       break-inside: avoid;
       page-break-inside: avoid;
     }
@@ -255,7 +258,7 @@
       .no-print { display: none !important; }
       #reporte { max-width: none; padding: 0; background: #fff; }
       .tarjeta { box-shadow: none; border: 1px solid #e6ebf2; }
-      .tarjeta, .alerta, tr { break-inside: avoid; page-break-inside: avoid; }
+      .kpis, .kpis-sec, .bloque, .encabezado, .resumen, .alerta, tr { break-inside: avoid; page-break-inside: avoid; }
       .encabezado, .badge, .kpi.semaforo, .alerta, .resumen {
         -webkit-print-color-adjust: exact;
         print-color-adjust: exact;
@@ -271,6 +274,11 @@
       .kpi-valor { font-size: 15px; }
     }
     body.exportando-pdf .no-print { display: none !important; }
+    /* html2pdf mete el tablero en el ancho útil de la hoja. Un ancho fijo en px se sale y corta la columna derecha. */
+    body.exportando-pdf .encabezado { flex-direction: row; align-items: center; }
+    body.exportando-pdf .kpis { grid-template-columns: repeat(5, minmax(0, 1fr)); }
+    body.exportando-pdf .kpis-sec { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+    body.exportando-pdf .fila-baja { grid-template-columns: 1fr; }
   </style>
 </head>
 <body>
@@ -370,7 +378,7 @@
 
       <section class="fila-baja">
         <div class="columna">
-          <section class="tarjeta">
+          <section class="tarjeta bloque">
             <h2>Avance planificado vs real por fase</h2>
             <p class="nota">Planificado = PV acumulado de la fase al corte / costo LB de la fase. Real = suma(% avance × costo LB) / costo LB. Escala de 0 a 100.</p>
             <div class="grafico-caja media" id="caja-fases">
@@ -1543,13 +1551,19 @@
       const enlace = document.getElementById("enlace-web");
       const urlWeb = enlace ? (enlace.getAttribute("href") || "") : "";
       document.body.classList.add("exportando-pdf");
+      void elemento.offsetWidth;
+      if (graficoCurva) graficoCurva.resize();
+      if (graficoFases) graficoFases.resize();
       const opciones = {
         margin: [6, 6, 14, 6],
         filename: "Entrega_PMO_Allan_Vejar_Pedro_Saenz_Tatiana_Hernandez.pdf",
         image: { type: "jpeg", quality: 0.95 },
         html2canvas: { scale: 2, backgroundColor: "#f5f7fa", useCORS: true, logging: false },
         jsPDF: { unit: "mm", format: "a4", orientation: "landscape" },
-        pagebreak: { mode: ["css", "legacy"] }
+        pagebreak: {
+          mode: ["css", "legacy"],
+          avoid: [".bloque", ".kpis", ".kpis-sec", ".resumen", ".encabezado", ".alerta", "tr"]
+        }
       };
       html2pdf().set(opciones).from(elemento).toPdf().get("pdf").then(function (pdf) {
         if (urlWeb && urlWeb.indexOf("http") === 0) {
@@ -1566,8 +1580,12 @@
         pdf.save(opciones.filename);
       }).then(function () {
         document.body.classList.remove("exportando-pdf");
+        if (graficoCurva) graficoCurva.resize();
+        if (graficoFases) graficoFases.resize();
       }).catch(function (err) {
         document.body.classList.remove("exportando-pdf");
+        if (graficoCurva) graficoCurva.resize();
+        if (graficoFases) graficoFases.resize();
         mostrarAviso("No se pudo generar el PDF. " + (err && err.message ? err.message : "Revisa la conexión."), true);
       });
     }
