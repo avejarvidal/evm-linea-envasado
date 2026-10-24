@@ -86,6 +86,9 @@
     .encabezado h1 { color: #fff; font-size: 22px; line-height: 1.25; overflow-wrap: break-word; }
     .subtitulo { color: #d6e4f2; margin: 4px 0 0; font-weight: 600; }
     .fase-impresa { color: #b7c9dc; margin: 2px 0 0; font-size: 12px; }
+    .elaborado { color: #f4c542; margin: 6px 0 0; font-size: 12px; font-weight: 600; overflow-wrap: anywhere; }
+    .web-github { margin: 4px 0 0; font-size: 12px; }
+    .web-github a { color: #fff; font-weight: 700; text-decoration: underline; }
     .encabezado-acciones {
       display: flex;
       gap: 10px;
@@ -281,6 +284,8 @@
         <h1>Proyecto: Línea de Envasado Frutícola del Maule</h1>
         <p id="subtitulo-corte" class="subtitulo">Corte: 04-09-2026</p>
         <p id="fase-impresa" class="fase-impresa">Fase: Todas</p>
+        <p class="elaborado">Entrega trabajo PMO · Elaborado por: Allan Vejar, Pedro Saenz y Tatiana Hernandez</p>
+        <p class="web-github"><a id="enlace-web" href="https://avejarvidal.github.io/evm-linea-envasado/">Acceso directo a la web</a></p>
       </div>
       <div class="encabezado-acciones">
         <label class="filtro no-print">Fase
@@ -1535,16 +1540,31 @@
         return;
       }
       const elemento = document.getElementById("reporte");
+      const enlace = document.getElementById("enlace-web");
+      const urlWeb = enlace ? (enlace.getAttribute("href") || "") : "";
       document.body.classList.add("exportando-pdf");
       const opciones = {
-        margin: 6,
-        filename: "Reporte_EVM_Fruticola_Maule.pdf",
+        margin: [6, 6, 14, 6],
+        filename: "Entrega_PMO_Allan_Vejar_Pedro_Saenz_Tatiana_Hernandez.pdf",
         image: { type: "jpeg", quality: 0.95 },
         html2canvas: { scale: 2, backgroundColor: "#f5f7fa", useCORS: true, logging: false },
         jsPDF: { unit: "mm", format: "a4", orientation: "landscape" },
         pagebreak: { mode: ["css", "legacy"] }
       };
-      html2pdf().set(opciones).from(elemento).save().then(function () {
+      html2pdf().set(opciones).from(elemento).toPdf().get("pdf").then(function (pdf) {
+        if (urlWeb && urlWeb.indexOf("http") === 0) {
+          const linea = "Acceso directo a la web: " + urlWeb;
+          const total = pdf.internal.getNumberOfPages();
+          for (let i = 1; i <= total; i++) {
+            pdf.setPage(i);
+            pdf.setFont("helvetica", "normal");
+            pdf.setFontSize(9);
+            pdf.setTextColor(44, 111, 187);
+            pdf.textWithLink(linea, 8, pdf.internal.pageSize.getHeight() - 5, { url: urlWeb });
+          }
+        }
+        pdf.save(opciones.filename);
+      }).then(function () {
         document.body.classList.remove("exportando-pdf");
       }).catch(function (err) {
         document.body.classList.remove("exportando-pdf");
