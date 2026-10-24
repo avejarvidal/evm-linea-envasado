@@ -370,7 +370,7 @@
 
       <section class="tarjeta bloque">
         <h2>Curva S de valor ganado</h2>
-        <p class="nota">Los montos del Excel son del periodo, no acumulados. El gráfico los acumula semana a semana y se detiene en la fecha de corte.</p>
+        <p class="nota">Los montos del Excel son del periodo, no acumulados. El gráfico los acumula hasta el fin del cronograma. Después del corte el PV sigue la línea base y EV y AC se mantienen en el último valor medido.</p>
         <div class="grafico-caja alta" id="caja-curva">
           <canvas id="grafico-curva" aria-label="Curva S con PV, EV y AC acumulados"></canvas>
         </div>
@@ -461,7 +461,7 @@
     /* ---------- Formatos: CLP, índices, porcentajes y fechas ---------- */
 
     function formatoNumero(n, decimales) {
-      if (n == null || !isFinite(n)) return "N/A";
+      if (n == null || !isFinite(n)) return decimales > 0 ? "0,00" : "0";
       const negativo = n < 0;
       const fijo = Math.abs(n).toFixed(decimales);
       const partes = fijo.split(".");
@@ -472,24 +472,24 @@
 
     /* Menos antes del signo peso: -$1.234.567 */
     function formatoCLP(n) {
-      if (n == null || !isFinite(n)) return "N/A";
+      if (n == null || !isFinite(n)) return "$0";
       const negativo = n < 0;
       return (negativo ? "-" : "") + "$" + formatoNumero(Math.round(Math.abs(n)), 0);
     }
 
     function formatoIndice(n) {
-      if (n == null || !isFinite(n)) return "N/A";
+      if (n == null || !isFinite(n)) return "0,00";
       return formatoNumero(n, 2);
     }
 
     /* ratio va de 0 a 1. 0,709 se muestra 70,9%. */
     function formatoPct(ratio) {
-      if (ratio == null || !isFinite(ratio)) return "N/A";
+      if (ratio == null || !isFinite(ratio)) return "0,0%";
       return formatoNumero(ratio * 100, 1) + "%";
     }
 
     function formatoFecha(iso) {
-      if (!iso) return "—";
+      if (!iso) return "Pendiente";
       const trozo = String(iso).slice(0, 10);
       const p = trozo.split("-");
       if (p.length !== 3) return String(iso);
@@ -991,34 +991,39 @@
       /* 2. BAC = suma del costo de línea base. */
       const bac = suma(tareas, function (t) { return numero(t.Costo_LB); });
 
-      /* 3. PV, EV y AC suman solo los periodos con Fecha_Corte <= corte. */
+      /* 3. Los KPI usan solo el corte. La curva guarda también las semanas futuras: ahí el Excel trae PV y deja EV/AC vacíos. */
       let pv = 0;
       let ev = 0;
       let ac = 0;
       const porSemana = {};
       estado.avance.forEach(function (a) {
         if (!ids[String(a.ID_Tarea)]) return;
-        if (!estado.fechaCorte || !fechaMenorIgual(a.Fecha_Corte, estado.fechaCorte)) return;
-        const vpv = numero(a.PV);
-        const vev = numero(a.EV);
-        const vac = numero(a.AC);
-        pv += vpv;
-        ev += vev;
-        ac += vac;
+        const enCorte = !estado.fechaCorte || fechaMenorIgual(a.Fecha_Corte, estado.fechaCorte);
         const sem = String(numero(a.Semana));
-        if (!porSemana[sem]) porSemana[sem] = { pv: 0, ev: 0, ac: 0, fecha: String(a.Fecha_Corte).slice(0, 10) };
-        porSemana[sem].pv += vpv;
-        porSemana[sem].ev += vev;
-        porSemana[sem].ac += vac;
+        if (!porSemana[sem]) {
+          porSemana[sem] = { pv: 0, ev: 0, ac: 0, fecha: String(a.Fecha_Corte).slice(0, 10), medida: enCorte };
+        }
+        porSemana[sem].pv += numero(a.PV);
+        if (enCorte) {
+          porSemana[sem].ev += numero(a.EV);
+          porSemana[sem].ac += numero(a.AC);
+          porSemana[sem].medida = true;
+          pv += numero(a.PV);
+          ev += numero(a.EV);
+          ac += numero(a.AC);
+        }
       });
 
-      /* 4. Si el divisor es 0 el índice queda en null y la tarjeta muestra N/A. */
-      const spi = pv === 0 ? null : ev / pv;
-      const cpi = ac === 0 ? null : ev / ac;
-      const eac = (cpi == null || cpi === 0) ? null : bac / cpi;
-      const vac = eac == null ? null : bac - eac;
+      /* 4. Sin PV ni EV el índice no tiene desviación medida: se informa 1,00 y el EAC queda en el BAC. */
+      const sinMedicion = pv === 0 && ev === 0 && ac === 0;
+      const spiImputado = pv === 0 && ev === 0;
+      const cpiImputado = ac === 0 && ev === 0;
+      const spi = pv === 0 ? (spiImputado ? 1 : null) : ev / pv;
+      const cpi = ac === 0 ? (cpiImputado ? 1 : null) : ev / ac;
+      const eac = sinMedicion ? bac : ((cpi == null || cpi === 0) ? bac : bac / cpi);
+      const vac = bac - eac;
       const denomTcpi = bac - ac;
-      const tcpi = denomTcpi === 0 ? null : (bac - ev) / denomTcpi;
+      const tcpi = denomTcpi === 0 ? 1 : (bac - ev) / denomTcpi;
 
       /* 5. Fecha estimada = inicio LB + (fin LB − inicio LB) / SPI. */
       const inicios = fechasOrdenadas(tareas, "Inicio_LB");
@@ -1029,34 +1034,36 @@
       const finPrevisto = finesPrev.length ? finesPrev[finesPrev.length - 1] : null;
       let fechaEstimada = null;
       let diasVsLB = null;
-      if (inicio && finLB && spi != null && spi !== 0) {
+      let fechaPorSpi = false;
+      if (inicio && finLB && spi != null && !spiImputado && spi !== 0) {
         const duracion = diasEntre(inicio, finLB);
         fechaEstimada = sumarDias(inicio, duracion / spi);
         diasVsLB = diasEntre(finLB, fechaEstimada);
+        fechaPorSpi = true;
+      } else if (finPrevisto) {
+        fechaEstimada = finPrevisto;
+        diasVsLB = finLB ? diasEntre(finLB, finPrevisto) : null;
+      } else if (finLB) {
+        fechaEstimada = finLB;
+        diasVsLB = 0;
       }
 
       const evPonderado = suma(tareas, function (t) { return numero(t.Pct_Avance) * numero(t.Costo_LB); });
-      const avanceReal = bac === 0 ? null : ev / bac;
-      const avancePlan = bac === 0 ? null : pv / bac;
-      const avancePonderado = bac === 0 ? null : evPonderado / bac;
+      const avanceReal = bac === 0 ? 0 : ev / bac;
+      const avancePlan = bac === 0 ? 0 : pv / bac;
+      const avancePonderado = bac === 0 ? 0 : evPonderado / bac;
 
-      /* Serie semanal del proyecto (o de la fase) acumulada hasta el corte. */
-      const semanasMapa = {};
-      estado.avance.forEach(function (a) {
-        if (!estado.fechaCorte || !fechaMenorIgual(a.Fecha_Corte, estado.fechaCorte)) return;
-        const sem = numero(a.Semana);
-        if (!semanasMapa[sem]) semanasMapa[sem] = String(a.Fecha_Corte).slice(0, 10);
-      });
-      const semanas = Object.keys(semanasMapa).map(Number).sort(function (a, b) { return a - b; });
+      /* La serie llega al fin del cronograma. Después del corte EV y AC suman 0 y el acumulado se mantiene. */
+      const semanas = Object.keys(porSemana).map(Number).sort(function (a, b) { return a - b; });
       let cpv = 0;
       let cev = 0;
       let cac = 0;
       const serie = semanas.map(function (sem) {
-        const bucket = porSemana[String(sem)] || { pv: 0, ev: 0, ac: 0 };
+        const bucket = porSemana[String(sem)];
         cpv += bucket.pv;
         cev += bucket.ev;
         cac += bucket.ac;
-        return { semana: sem, fecha: semanasMapa[sem], pv: cpv, ev: cev, ac: cac };
+        return { semana: sem, fecha: bucket.fecha, pv: cpv, ev: cev, ac: cac, medida: bucket.medida };
       });
 
       /* Barras por fase: plan con PV/BAC y real con el % ponderado por costo. */
@@ -1124,6 +1131,9 @@
         ac: ac,
         spi: spi,
         cpi: cpi,
+        spiImputado: spiImputado,
+        cpiImputado: cpiImputado,
+        sinMedicion: sinMedicion,
         eac: eac,
         vac: vac,
         tcpi: tcpi,
@@ -1131,6 +1141,7 @@
         finLB: finLB,
         finPrevisto: finPrevisto,
         fechaEstimada: fechaEstimada,
+        fechaPorSpi: fechaPorSpi,
         diasVsLB: diasVsLB,
         avanceReal: avanceReal,
         avancePlan: avancePlan,
@@ -1141,8 +1152,16 @@
         criticas: criticas,
         sobrecarga: calcularSobrecarga(ids, todas),
         peor: peor,
-        semaforo: colorDe(peor)
+        semaforo: sinMedicion ? "neutro" : colorDe(peor)
       };
+    }
+
+    function textoIndice(n) {
+      return n == null || !isFinite(n) ? "0,00" : formatoIndice(n);
+    }
+
+    function fechaVisible(iso) {
+      return iso ? formatoFecha(iso) : "Pendiente";
     }
 
     function textoConteo(c) {
@@ -1168,18 +1187,16 @@
       const partes = [];
       const corteTxt = estado.fechaCorte ? ("Al corte del " + formatoFecha(estado.fechaCorte) + ", ") : "";
       partes.push(corteTxt + "estado " + alcance + ": " + (etiquetas[evm.semaforo] || "sin medición") + ".");
-      if (evm.spi == null && evm.cpi == null) {
-        partes.push("No hay PV ni AC hasta el corte, así que SPI, CPI, EAC y la fecha estimada por SPI quedan en N/A.");
+      if (evm.sinMedicion) {
+        partes.push("Hasta el corte no hay PV, EV ni AC ($0). SPI y CPI se informan en 1,00 porque todavía no hay desviación medida. EAC se iguala al BAC (" + formatoCLP(evm.bac) + ") y el VAC queda en $0.");
       } else {
-        partes.push("SPI " + formatoIndice(evm.spi) + " (EV/PV) y CPI " + formatoIndice(evm.cpi) + " (EV/AC). El semáforo usa el peor de los dos: verde desde 1,00, amarillo desde 0,90 y rojo por debajo.");
+        partes.push("SPI " + textoIndice(evm.spi) + " (EV/PV) y CPI " + textoIndice(evm.cpi) + " (EV/AC). El semáforo usa el peor de los dos: verde desde 1,00, amarillo desde 0,90 y rojo por debajo.");
       }
-      if (evm.avanceReal != null) {
-        partes.push("Avance real " + formatoPct(evm.avanceReal) + " del BAC (" + formatoCLP(evm.bac) + ") frente a " + formatoPct(evm.avancePlan) + " planificado (PV/BAC).");
-      }
+      partes.push("Avance real " + formatoPct(evm.avanceReal) + " del BAC (" + formatoCLP(evm.bac) + ") frente a " + formatoPct(evm.avancePlan) + " planificado (PV/BAC).");
       if (evm.avancePonderado != null && evm.avanceReal != null && Math.abs(evm.avancePonderado - evm.avanceReal) > 0.005) {
         partes.push("El avance ponderado por costo es " + formatoPct(evm.avancePonderado) + ".");
       }
-      if (evm.fechaEstimada) {
+      if (evm.fechaPorSpi && evm.fechaEstimada) {
         let cuando = "en la misma fecha de línea base (" + formatoFecha(evm.finLB) + ")";
         if (evm.diasVsLB > 0) cuando = evm.diasVsLB + " días después del fin de línea base (" + formatoFecha(evm.finLB) + ")";
         else if (evm.diasVsLB < 0) cuando = Math.abs(evm.diasVsLB) + " días antes del fin de línea base (" + formatoFecha(evm.finLB) + ")";
@@ -1193,10 +1210,14 @@
         }
       } else if (evm.finPrevisto) {
         const d = diasEntre(evm.finLB, evm.finPrevisto);
-        partes.push("Sin estimación por SPI. El fin previsto del cronograma es el " + formatoFecha(evm.finPrevisto)
+        partes.push("No hay SPI medido. La fecha que se muestra es el fin previsto, " + formatoFecha(evm.finPrevisto)
           + (d > 0 ? " (" + d + " días después del fin LB " + formatoFecha(evm.finLB) + ")." : "."));
       }
-      partes.push("Capex a término (EAC) " + formatoCLP(evm.eac) + ". Desviación a término (VAC) " + formatoCLP(evm.vac) + ". TCPI " + formatoIndice(evm.tcpi) + ".");
+      if (!evm.sinMedicion) {
+        partes.push("Capex a término (EAC) " + formatoCLP(evm.eac) + ". Desviación a término (VAC) " + formatoCLP(evm.vac) + ". TCPI " + textoIndice(evm.tcpi) + ".");
+      } else {
+        partes.push("TCPI " + textoIndice(evm.tcpi) + ".");
+      }
       partes.push(textoConteo(evm.conteo));
 
       if (evm.todas) {
@@ -1230,7 +1251,7 @@
       caja.className = "tarjeta resumen " + evm.semaforo;
       const badge = document.getElementById("badge-estado");
       const nombres = { verde: "Verde", amarillo: "Amarillo", rojo: "Rojo", neutro: "Sin medición" };
-      badge.textContent = nombres[evm.semaforo] || "—";
+      badge.textContent = nombres[evm.semaforo] || "Sin medición";
       badge.className = "badge " + evm.semaforo;
       document.getElementById("texto-resumen").textContent = textoResumen(evm);
       document.getElementById("fase-impresa").textContent = evm.todas ? "Fase: Todas" : ("Fase: " + evm.fase);
@@ -1239,24 +1260,34 @@
     function renderizarKPIs(evm) {
       const spiEl = document.getElementById("valor-spi");
       const cpiEl = document.getElementById("valor-cpi");
-      spiEl.textContent = formatoIndice(evm.spi);
-      cpiEl.textContent = formatoIndice(evm.cpi);
-      spiEl.className = "kpi-valor " + colorDe(evm.spi);
-      cpiEl.className = "kpi-valor " + colorDe(evm.cpi);
-      document.getElementById("kpi-spi").className = "tarjeta kpi semaforo " + colorDe(evm.spi);
-      document.getElementById("kpi-cpi").className = "tarjeta kpi semaforo " + colorDe(evm.cpi);
-      document.getElementById("ayuda-spi").textContent = evm.spi == null ? "EV / PV no se calcula: PV es 0." : ("EV / PV · " + formatoCLP(evm.ev) + " / " + formatoCLP(evm.pv));
-      document.getElementById("ayuda-cpi").textContent = evm.cpi == null ? "EV / AC no se calcula: AC es 0." : ("EV / AC · " + formatoCLP(evm.ev) + " / " + formatoCLP(evm.ac));
+      const colorSpi = evm.spiImputado || evm.spi == null ? "neutro" : colorDe(evm.spi);
+      const colorCpi = evm.cpiImputado || evm.cpi == null ? "neutro" : colorDe(evm.cpi);
+      spiEl.textContent = textoIndice(evm.spi);
+      cpiEl.textContent = textoIndice(evm.cpi);
+      spiEl.className = "kpi-valor " + colorSpi;
+      cpiEl.className = "kpi-valor " + colorCpi;
+      document.getElementById("kpi-spi").className = "tarjeta kpi semaforo " + colorSpi;
+      document.getElementById("kpi-cpi").className = "tarjeta kpi semaforo " + colorCpi;
+      document.getElementById("ayuda-spi").textContent = evm.spiImputado
+        ? "Sin PV al corte. Se informa 1,00: todavía no hay desviación. EV $0 / PV $0."
+        : ("EV / PV · " + formatoCLP(evm.ev) + " / " + formatoCLP(evm.pv));
+      document.getElementById("ayuda-cpi").textContent = evm.cpiImputado
+        ? "Sin AC al corte. Se informa 1,00: todavía no hay desviación. EV $0 / AC $0."
+        : ("EV / AC · " + formatoCLP(evm.ev) + " / " + formatoCLP(evm.ac));
 
       document.getElementById("valor-eac").textContent = formatoCLP(evm.eac);
-      document.getElementById("ayuda-eac").textContent = evm.eac == null ? "Capex a término no se calcula: CPI es 0 o N/A." : ("Capex a término · BAC " + formatoCLP(evm.bac) + " / CPI");
+      document.getElementById("ayuda-eac").textContent = evm.sinMedicion || evm.cpiImputado
+        ? ("Sin costo real al corte. EAC se iguala al BAC " + formatoCLP(evm.bac) + ".")
+        : ("Capex a término · BAC " + formatoCLP(evm.bac) + " / CPI");
 
-      document.getElementById("valor-tcpi").textContent = formatoIndice(evm.tcpi);
-      document.getElementById("ayuda-tcpi").textContent = evm.tcpi == null ? "(BAC − EV) / (BAC − AC) no se calcula: el divisor es 0." : "(BAC − EV) / (BAC − AC)";
+      document.getElementById("valor-tcpi").textContent = textoIndice(evm.tcpi);
+      document.getElementById("ayuda-tcpi").textContent = evm.sinMedicion
+        ? "Sin gasto ni valor ganado. TCPI queda en 1,00."
+        : "(BAC − EV) / (BAC − AC)";
 
-      document.getElementById("valor-fecha").textContent = evm.fechaEstimada ? formatoFecha(evm.fechaEstimada) : "N/A";
+      document.getElementById("valor-fecha").textContent = fechaVisible(evm.fechaEstimada);
       let ayudaFecha = "Inicio + (fin LB − inicio) / SPI";
-      if (evm.spi == null || evm.spi === 0) ayudaFecha = "No se puede dividir la duración por SPI.";
+      if (!evm.fechaPorSpi) ayudaFecha = "No hay SPI medido. Se muestra el fin previsto del cronograma.";
       else if (evm.diasVsLB > 0) ayudaFecha = "+" + evm.diasVsLB + " días respecto del fin LB (" + formatoFecha(evm.finLB) + ")";
       else if (evm.diasVsLB < 0) ayudaFecha = evm.diasVsLB + " días respecto del fin LB (" + formatoFecha(evm.finLB) + ")";
       else if (evm.diasVsLB === 0) ayudaFecha = "Misma fecha que el fin LB (" + formatoFecha(evm.finLB) + ")";
@@ -1265,12 +1296,12 @@
 
       const vacEl = document.getElementById("valor-vac");
       vacEl.textContent = formatoCLP(evm.vac);
-      vacEl.className = "kpi-valor" + (evm.vac == null ? "" : (evm.vac < 0 ? " malo" : " bueno"));
-      document.getElementById("ayuda-vac").textContent = evm.vac == null ? "BAC − EAC no se calcula porque EAC es N/A." : "BAC − EAC";
+      vacEl.className = "kpi-valor" + (evm.vac < 0 ? " malo" : (evm.vac > 0 ? " bueno" : ""));
+      document.getElementById("ayuda-vac").textContent = evm.sinMedicion ? "BAC − EAC = $0. La fase no ha empezado." : "BAC − EAC";
 
       const realTxt = formatoPct(evm.avancePonderado != null ? evm.avancePonderado : evm.avanceReal);
       const planTxt = formatoPct(evm.avancePlan);
-      document.getElementById("valor-avance").textContent = (evm.avanceReal == null ? "N/A" : realTxt + " vs " + planTxt);
+      document.getElementById("valor-avance").textContent = realTxt + " vs " + planTxt;
       document.getElementById("etiq-plan").textContent = "Plan " + planTxt;
       document.getElementById("etiq-real").textContent = "Real " + realTxt;
       const ancho = function (ratio) {
@@ -1326,7 +1357,13 @@
                   const i = items[0].dataIndex;
                   return "Semana " + evm.serie[i].semana + " · " + formatoFecha(evm.serie[i].fecha);
                 },
-                label: function (ctx) { return ctx.dataset.label + ": " + formatoCLP(ctx.parsed.y); }
+                label: function (ctx) {
+                  const punto = evm.serie[ctx.dataIndex];
+                  const valor = ctx.dataset.label + ": " + formatoCLP(ctx.parsed.y);
+                  if (punto && !punto.medida && ctx.dataset.label !== "PV") return valor + " · igual al corte, sin medición nueva";
+                  if (punto && !punto.medida) return valor + " · plan posterior al corte";
+                  return valor;
+                }
               }
             }
           },
@@ -1337,7 +1374,6 @@
               ticks: {
                 callback: function (v) {
                   const abs = Math.abs(v);
-                  if (abs >= 1e9) return (v < 0 ? "-" : "") + "$" + formatoNumero(abs / 1e9, 1) + " mil mill.";
                   if (abs >= 1e6) return (v < 0 ? "-" : "") + "$" + formatoNumero(abs / 1e6, 0) + " mill.";
                   return formatoCLP(v);
                 }
@@ -1346,10 +1382,24 @@
           }
         }
       });
+      const medidas = evm.serie.filter(function (p) { return p.medida; });
+      const futuras = evm.serie.filter(function (p) { return !p.medida; });
       const ultimo = evm.serie[evm.serie.length - 1];
-      nota.textContent = "Último punto acumulado (semana " + ultimo.semana + ", " + formatoFecha(ultimo.fecha) + "): PV "
-        + formatoCLP(ultimo.pv) + " · EV " + formatoCLP(ultimo.ev) + " · AC " + formatoCLP(ultimo.ac)
-        + ". Esos totales suman los periodos del Excel; el archivo no los trae acumulados.";
+      let textoNota;
+      if (!medidas.length) {
+        textoNota = "Al corte esta fase todavía no tiene semanas medidas. El PV del cronograma va de la semana "
+          + evm.serie[0].semana + " (" + formatoFecha(evm.serie[0].fecha) + ", " + formatoCLP(evm.serie[0].pv) + ") a la semana "
+          + ultimo.semana + " (" + formatoFecha(ultimo.fecha) + ", " + formatoCLP(ultimo.pv) + "). EV y AC quedan en $0.";
+      } else {
+        const ultimaMedida = medidas[medidas.length - 1];
+        textoNota = "Último punto medido (semana " + ultimaMedida.semana + ", " + formatoFecha(ultimaMedida.fecha) + "): PV "
+          + formatoCLP(ultimaMedida.pv) + " · EV " + formatoCLP(ultimaMedida.ev) + " · AC " + formatoCLP(ultimaMedida.ac) + ".";
+        if (futuras.length) {
+          textoNota += " Desde la semana " + futuras[0].semana + " el PV sigue el cronograma, hasta "
+            + formatoFecha(ultimo.fecha) + " (" + formatoCLP(ultimo.pv) + "). EV y AC se quedan en el valor del corte: esas celdas del Excel vienen vacías.";
+        }
+      }
+      nota.textContent = textoNota;
     }
 
     function renderizarFases(evm) {
@@ -1360,6 +1410,26 @@
       const lienzo = document.getElementById("grafico-fases");
       graficoFases = new Chart(lienzo, {
         type: "bar",
+        plugins: [{
+          id: "etiquetaCero",
+          afterDatasetsDraw: function (chart) {
+            const ctx = chart.ctx;
+            const escalaX = chart.scales.x;
+            const escalaY = chart.scales.y;
+            if (!escalaX || !escalaY) return;
+            chart.data.labels.forEach(function (_, i) {
+              const plan = chart.data.datasets[0].data[i];
+              const real = chart.data.datasets[1].data[i];
+              if (plan >= 1 || real >= 1) return;
+              ctx.save();
+              ctx.fillStyle = "#526070";
+              ctx.font = "11px Inter, system-ui, sans-serif";
+              ctx.textBaseline = "middle";
+              ctx.fillText("Plan 0% · Real 0%", escalaX.getPixelForValue(0) + 8, escalaY.getPixelForTick(i));
+              ctx.restore();
+            });
+          }
+        }],
         data: {
           labels: evm.fases.map(function (f) { return f.nombre; }),
           datasets: [
@@ -1422,14 +1492,14 @@
         const fila = document.createElement("tr");
         if (numero(t.Dias_Atraso) > 0) fila.className = "atrasada";
         const celdas = [
-          t.EDT || "—",
-          t.Tarea || "—",
-          t.Fase || "—",
-          t.Estado || "—",
-          t.Dias_Atraso == null || t.Dias_Atraso === "" ? "—" : formatoNumero(numero(t.Dias_Atraso), 0),
-          formatoFecha(t.Fin_LB),
-          formatoFecha(t.Fin_Previsto),
-          t.Pct_Avance == null || t.Pct_Avance === "" ? "—" : formatoPct(numero(t.Pct_Avance))
+          t.EDT || "Pendiente",
+          t.Tarea || "Pendiente",
+          t.Fase || "Pendiente",
+          t.Estado || "Pendiente",
+          t.Dias_Atraso == null || t.Dias_Atraso === "" ? "0" : formatoNumero(numero(t.Dias_Atraso), 0),
+          fechaVisible(t.Fin_LB),
+          fechaVisible(t.Fin_Previsto),
+          t.Pct_Avance == null || t.Pct_Avance === "" ? "0,0%" : formatoPct(numero(t.Pct_Avance))
         ];
         celdas.forEach(function (valor, i) {
           const td = document.createElement("td");
@@ -1473,7 +1543,7 @@
       const tope = tareas.slice(0, 6);
       tope.forEach(function (t) {
         const li = document.createElement("li");
-        li.textContent = (t.EDT || "—") + " · " + (t.Tarea || "—") + " · " + (t.Estado || "—")
+        li.textContent = (t.EDT || "Pendiente") + " · " + (t.Tarea || "Pendiente") + " · " + (t.Estado || "Pendiente")
           + " · " + formatoNumero(numero(t.Dias_Atraso), 0) + " días · fin previsto " + formatoFecha(t.Fin_Previsto)
           + " · " + formatoPct(numero(t.Pct_Avance));
         ul.appendChild(li);
